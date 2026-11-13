@@ -6,11 +6,11 @@ Runnable both ways:
 
 Natural keys (重复执行不新增、不覆盖用户修改):
     users.email · table_meta.table_name · table_column(table_id,name)
-    partition_meta(table_id,dt) · query_log.external_id · estimate_run.run_no
-    rewrite_suggestion.suggestion_no · budget_policy.policy_no
+    partition_meta(table_id,dt) · query_log.external_id · query_execution.external_id
+    estimate_run.run_no · rewrite_suggestion.suggestion_no · budget_policy.policy_no
 
 The last stdout line is always the stable contract line:
-    SEED_SUMMARY brand=partfit tables=6 partitions=90 queries=60 estimates=2 suggestions=12 users=3
+    SEED_SUMMARY brand=partfit tables=6 partitions=90 queries=60 executions=76 estimates=2 suggestions=12 users=3
 """
 from __future__ import annotations
 
@@ -34,6 +34,7 @@ from src.models import (  # noqa: E402
     BudgetPolicy,
     EstimateRun,
     PartitionMeta,
+    QueryExecution,
     QueryLog,
     RewriteSuggestion,
     TableColumn,
@@ -41,7 +42,7 @@ from src.models import (  # noqa: E402
     User,
 )
 from src.models.base import utcnow  # noqa: E402
-from src.services import query_service, rewrite_service, table_service  # noqa: E402
+from src.services import execution_service, query_service, rewrite_service, table_service  # noqa: E402
 from src.services.estimate_service import budget_status_for  # noqa: E402
 from src.utils.password import hash_password  # noqa: E402
 
@@ -152,6 +153,17 @@ def seed_queries(db) -> int:
     db.commit()
     _log(f"queries created={created} total={len(demo_dataset.build_queries())}")
     return created
+
+
+def seed_executions(db) -> dict:
+    """把执行事件（每小时多次/重复投递/失败/跨窗口）落成模板账本流水。"""
+    events = demo_dataset.build_executions()
+    summary = execution_service.sync_executions(db, events)
+    _log(
+        f"executions created={summary['created']} billed={summary['billed']} "
+        f"duplicate={summary['duplicate']} failed={summary['failed']}"
+    )
+    return summary
 
 
 def seed_estimates(db) -> int:
@@ -297,6 +309,7 @@ def collect_counts(db) -> dict:
         )
         or 0
     )
+    executions = int(db.scalar(select(func.count(QueryExecution.id))) or 0)
     estimates = int(db.scalar(select(func.count(EstimateRun.id)).where(EstimateRun.run_no.in_(run_nos))) or 0)
     suggestions = int(
         db.scalar(
@@ -309,6 +322,7 @@ def collect_counts(db) -> dict:
         "tables": tables,
         "partitions": partitions,
         "queries": queries,
+        "executions": executions,
         "estimates": estimates,
         "suggestions": suggestions,
         "users": users,
@@ -323,13 +337,16 @@ def run_seed() -> dict:
         seed_budget(db)
         seed_tables(db)
         seed_queries(db)
+        seed_executions(db)
         seed_estimates(db)
         seed_suggestions(db)
         counts = collect_counts(db)
+    # 向后兼容：保留原 SEED_SUMMARY 行（queries=60 ...），executions 作为附加键输出
     summary = {
         "SEED_SUMMARY": (
             f"SEED_SUMMARY brand={demo_dataset.BRAND} tables={counts['tables']} "
             f"partitions={counts['partitions']} queries={counts['queries']} "
+            f"executions={counts['executions']} "
             f"estimates={counts['estimates']} suggestions={counts['suggestions']} "
             f"users={counts['users']}"
         ),

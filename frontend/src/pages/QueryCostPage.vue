@@ -276,6 +276,10 @@ onMounted(loadAll)
             </button>
             <p v-else class="hint">只读角色不具备导入权限（403）。</p>
             <div class="divider" />
+            <button class="btn btn--ghost" type="button" style="width: 100%" @click="router.push({ name: 'query-templates' })">
+              切换到查询模板成本账（按时间窗聚合）→
+            </button>
+            <div class="divider" />
             <p class="hint" style="margin-bottom: 0">
               当前排序：<span class="mono">{{ queries.filters.sort }}</span> ·
               共 <span class="mono">{{ queries.total }}</span> 条 ·

@@ -627,6 +627,128 @@ def build_queries(tables: list[dict] | None = None) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# 2b. 执行流水（模板账本数据源）
+# ---------------------------------------------------------------------------
+# 演示日 = END_DATE（2026-11-12）。执行按小时窗归桶，覆盖：
+#   ① 同一模板每小时跑多次（调度小时级刷新）② 调整日期参数 → 同指纹不同参数
+#   ③ 重复投递（同窗口同模板同参数，只计一次费）④ 跨窗口不串账
+#   ⑤ 失败执行（engine 报错 / 解析失败，单列且计入覆盖率）
+EXECUTION_DAY = END_DATE.isoformat()
+# 失败态样本：engine 执行失败（SQL 本身可解析，但跑挂了，不计扫描量）
+FAILED_RUN_SQL = (
+    "SELECT order_id, buyer_id, gmv, pay_amount FROM dwd_order_detail\n"
+    "WHERE dt = '2026-11-12' AND order_status = 'PAID'"
+)
+# 解析失败 / 缺表样本：算法 1 无法估算（unparsed / missing_table）
+UNPARSED_RUN_SQL = "SELECT FROM FROM dwd_order_detail WHERE dt = '2026-11-12'"
+MISSING_TABLE_RUN_SQL = "SELECT id FROM lantu_tmp.tmp_offline_export_20261112 WHERE dt = '2026-11-12'"
+
+FAILED_RUN_ERROR = "engine error: partition column file missing (FileNotFound 404)"
+UNPARSED_RUN_ERROR = "sqlglot 解析失败：mismatched input 'FROM'"
+MISSING_TABLE_RUN_ERROR = "目标表 tmp_offline_export_20261112 不在元数据目录中"
+
+
+def _ts(hour: int, minute: int, second: int = 0) -> str:
+    return f"{EXECUTION_DAY} {hour:02d}:{minute:02d}:{second:02d}"
+
+
+def build_executions(queries: list[dict] | None = None) -> list[dict]:
+    """确定性生成执行流水（纯数据，不依赖数据库/模板归一化）。
+
+    每条事件字段：
+        event_no      自然键 EX-####（幂等 seed 用）
+        query_index   对应 build_queries() 的行序号（0-based）；失败样本为 -1/-2/-3
+        sql_text      实际执行的 SQL（失败样本独立提供）
+        executed_at   执行时间戳
+        run_status    success / failed
+        error_message 失败原因（成功为 None）
+        duration_ms   本次耗时
+        duplicate     是否重复投递（同窗口同模板同参数，不计费）
+    模板指纹 / 窗口 / 计费判定在 seed 阶段由 analysis.template + 服务层统一计算，
+    本函数只负责给出真实世界会发生的「执行事件」。
+    """
+    queries = queries if queries is not None else build_queries()
+    events: list[dict] = []
+
+    def add(query_index: int, sql: str, hour: int, minute: int, *,
+            status: str = "success", error: str | None = None,
+            duration_ms: int | None = None, duplicate: bool = False,
+            second: int = 0) -> None:
+        base = queries[query_index] if 0 <= query_index < len(queries) else {}
+        events.append(
+            {
+                "event_no": f"EX-{len(events) + 1:04d}",
+                "query_index": query_index,
+                "sql_text": sql,
+                "title": base.get("title", "（失败执行）"),
+                "source": base.get("source", "adhoc"),
+                "submitted_by": base.get("submitted_by", ENGINEER),
+                "is_scheduled": base.get("is_scheduled", False),
+                "executed_at": _ts(hour, minute, second),
+                "run_status": status,
+                "error_message": error,
+                "duration_ms": duration_ms if duration_ms is not None else base.get("duration_ms", 12_000),
+                "duplicate": duplicate,
+            }
+        )
+
+    # --- 1. 每个模板至少一次成功执行，时间窗按行号确定性分散在 08:00-18:00 ---
+    for index, row in enumerate(queries):
+        hour = 8 + (index * 37 % 11)          # 08..18
+        minute = (index * 13) % 60
+        add(index, row["sql_text"], hour, minute)
+
+    # --- 2. 调度模板：每小时跑几次（09/10/11 三个窗口），两次运行参数不同 → 同模板都计费 ---
+    #   取两条 is_scheduled 的代表：QL-0004（ods 渠道 GMV 小时刷新，index=3）
+    #   与 QL-0006（dws 行数校验，index=5）
+    ods_dates = _scheduled_dates("ods_order_raw")
+
+    def _ods_gmv_sql(stamp: str) -> str:
+        return (
+            "SELECT channel, sum(pay_amount) AS gmv FROM ods_order_raw\n"
+            f"WHERE to_char(dt, 'YYYY-MM-DD') = '{stamp}'\nGROUP BY channel"
+        )
+
+    for k, hour in enumerate((9, 10, 11)):
+        idx = min(k, len(ods_dates) - 1)
+        stamp = ods_dates[idx]
+        # 同窗第二次取与首条不同的另一个分区；偏移 2 并环形回绕，
+        # 既避开同条参数（重复投递由 Top1 显式样本演示），也避开 base run 的末分区参数
+        stamp_alt = ods_dates[(idx - 2) % len(ods_dates)]
+        add(3, _ods_gmv_sql(stamp), hour, 5, duration_ms=94_000 + k * 1_200, second=12)
+        # 同窗第二次：换一个日期参数 → 同模板、不同参数值，仍各自计费（不是重复投递）
+        add(3, _ods_gmv_sql(stamp_alt), hour, 35, duration_ms=96_000 + k * 900, second=40)
+
+    # --- 3. 调整日期参数：同模板、不同参数值、不同窗口（验证指纹不随参数变化） ---
+    for k, hour in enumerate((13, 15, 17)):
+        day = 21 + k
+        stamp = f"202611{day:02d}"
+        sql = f"SELECT count(*) AS cnt FROM dwd_order_detail WHERE dt = {stamp}"
+        add(6, sql, hour, 20, duration_ms=205_000 + k * 2_000)
+
+    # --- 4. 重复投递：同窗口 + 同模板 + 同参数，只有首条计费 ---
+    top1 = queries[0]  # QL-0001 双 11 全量导出
+    add(0, top1["sql_text"], 14, 10, duration_ms=486_000)
+    add(0, top1["sql_text"], 14, 10, duration_ms=481_000, duplicate=True, second=26)
+    add(0, top1["sql_text"], 14, 11, duration_ms=479_000, duplicate=True, second=48)
+
+    # --- 5. 失败执行（engine 报错）：SQL 可解析但执行失败，单列、不计费、纳入覆盖率 ---
+    add(-1, FAILED_RUN_SQL, 16, 22, status="failed", error=FAILED_RUN_ERROR, duration_ms=312_000)
+    add(-1, FAILED_RUN_SQL, 16, 41, status="failed", error=FAILED_RUN_ERROR,
+        duration_ms=298_000, duplicate=True)
+    # 解析失败 / 缺表：模板归一化走正则兜底，算法 1 失败态显式保留
+    add(-2, UNPARSED_RUN_SQL, 17, 8, status="failed", error=UNPARSED_RUN_ERROR, duration_ms=4_200)
+    add(-3, MISSING_TABLE_RUN_SQL, 18, 2, status="failed", error=MISSING_TABLE_RUN_ERROR, duration_ms=7_600)
+
+    return events
+
+
+def _scheduled_dates(table_name: str) -> list[str]:
+    table_map = {t["table_name"]: t for t in build_tables()}
+    return [p["dt"] for p in table_map[table_name]["partitions"]][-3:]
+
+
+# ---------------------------------------------------------------------------
 # 3. 预算策略（admin 维护）
 # ---------------------------------------------------------------------------
 BUDGET_POLICIES = [

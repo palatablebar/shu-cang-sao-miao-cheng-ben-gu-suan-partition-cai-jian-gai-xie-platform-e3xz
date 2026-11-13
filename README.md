@@ -22,6 +22,7 @@
 | 模块 | 说明 |
 |---|---|
 | 查询成本排行 | 按扫描字节/费用/耗时排行，标注「可裁剪 / 裁剪失效 + 原因」，支持来源、表、关键字过滤 |
+| 查询模板成本账 | 按小时时间窗把结构相同（字面量归一为占位符）的执行归并为一个查询模板，用执行次数与累计扫描量排序；重复投递不重复计费、跨窗口不串账、失败执行单列并计入覆盖率，可展开每次执行对比单次/累计费用并核对执行数=计入+重复+异常 |
 | SQL 解析详情 | sqlglot 解析结果：分区谓词逐条判定、命中分区、列裁剪比例、扫描量拆解、可解释结论 |
 | 改写建议与前后对比 | 反模式识别 → 等价改写 SQL → 重估节省 → 按 `saving × confidence ÷ risk_weight` 排序，可采纳/导出 |
 | 表与分区元数据 | 6 张表 / 90 个日分区 / 列字节统计 / 建议投影列；admin 可维护负责人与说明 |
@@ -51,6 +52,24 @@ P_hit      = { p | 分区谓词在 p.dt 上求值为真 }
 - 风险与置信度：低风险 1.0/0.95、中风险 1.6/0.90、高风险 2.4/0.62（同一查询命中多类取最严 + 最低置信度）；
 - **改写后扫描量不是估算系数**，而是把改写 SQL 重新喂给算法 1 求解，`saving = before − after`，`score = saving_bytes × confidence ÷ risk_weight`。
 
+### 模板账本：时间窗 + 模板指纹的执行计费（`backend/src/analysis/template.py`、`services/template_service.py`、`services/execution_service.py`）
+
+解决「同一模板每小时跑几次只占一行、调整日期参数又被拆成不同查询、月底看不出谁在持续烧钱」的问题：
+
+```
+fingerprint      = sha256(canonical_sql)        # 字面量统一替换为 ? 后的结构指纹
+canonical_sql    = sqlglot 解析 → 字面量/IN 列表 → 占位符（解析失败走正则兜底，绝不丢日志）
+window_start     = 执行时间按小时归桶 'YYYY-MM-DD HH:00'
+dedupe_key       = window_start | fingerprint | param_fingerprint
+```
+
+- **模板归并**：日期/数字等参数值变化只改 `param_fingerprint`，不改 `fingerprint`；结构相同的执行（含调参）在同一窗口归为同一个 `TPL-<fingerprint>` 模板。
+- **时间窗隔离**：聚合键 = `(window_start, fingerprint)`，同一模板在不同小时窗各自独立出账，**跨窗口不串账**。
+- **重复投递不重复计费**：同窗口同模板同参数（`dedupe_key`）只有第一条成功执行 `is_billed=true`，其余 `is_billed=false`，累计扫描量/费用只对计入执行求和。
+- **失败执行单列且纳入覆盖率**：`run_status=failed` 的执行扫描量强制为 0、不计费，但计入执行总数；`coverage_pct = (执行数 − 异常数) / 执行数 × 100`。
+- **可核对恒等式**：`执行数 = 计入数 + 重复数 + 异常数`；页面可展开模板查看每次执行，对比「单次费用（最近一次计入执行）」与「累计费用（全部计入执行之和）」。
+- 排序支持累计扫描量（默认）、执行次数、累计费用、异常数、最近执行。
+
 ## 4. 快速启动
 
 ```bash
@@ -64,7 +83,7 @@ open http://localhost:18243
 - 后端：<http://localhost:19243/docs>（健康检查 `/health`、`/api/health`）
 - PostgreSQL：`localhost:17743`（库 `partfit_db`）
 
-手工重跑 seed（幂等，最后一行固定输出 `SEED_SUMMARY brand=partfit tables=6 partitions=90 queries=60 estimates=2 suggestions=12 users=3`）：
+手工重跑 seed（幂等，最后一行固定输出 `SEED_SUMMARY brand=partfit tables=6 partitions=90 queries=60 executions=76 estimates=2 suggestions=12 users=3`，其中 `executions` 为模板账本执行流水数：70 计入 + 2 重复投递 + 4 失败）：
 
 ```bash
 docker compose exec -T backend python -m scripts.seed_demo
@@ -97,8 +116,8 @@ docker compose exec -T backend python -m scripts.seed_demo
 ```
 backend/
   src/{config,constants,models,schemas,analysis,services,controllers,routes,middlewares,utils,tasks}
-  scripts/{seed_demo.py,demo_dataset.py}
-  migrations/0001_initial.sql
+  scripts/{seed_demo.py,demo_dataset.py,_selftest_template.py,_selftest_ledger.py}
+  migrations/{0001_initial.sql,0002_query_execution.sql}
 worker/{Dockerfile,entrypoint.sh,healthy.py}
 frontend/src/{api,stores,types,components/common,hooks,pages,router,utils,constants,styles}
 docker-compose.yml  .env.example  README.md

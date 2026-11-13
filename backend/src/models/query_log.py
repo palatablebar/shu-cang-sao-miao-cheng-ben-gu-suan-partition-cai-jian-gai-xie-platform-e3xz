@@ -43,3 +43,6 @@ class QueryLog(Base, TimestampMixin):
     analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     suggestions = relationship("RewriteSuggestion", back_populates="query")
+    executions = relationship(
+        "QueryExecution", back_populates="query", passive_deletes=True
+    )

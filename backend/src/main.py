@@ -14,7 +14,7 @@ from src.middlewares.audit_logger import AuditMiddleware
 from src.middlewares.auth import AuthMiddleware
 from src.middlewares.error_handler import RequestIdMiddleware, install_error_handlers
 from src.middlewares.rate_limit import RateLimitMiddleware
-from src.routes import audit, auth, budget, estimates, health, queries, rewrites, tables
+from src.routes import audit, auth, budget, estimates, health, queries, rewrites, tables, templates
 from src.utils.logger import log_event
 
 
@@ -62,6 +62,7 @@ for _prefix in ("", "/api"):
     app.include_router(health.router, prefix=_prefix)
     app.include_router(auth.router, prefix=_prefix)
     app.include_router(queries.router, prefix=_prefix)
+    app.include_router(templates.router, prefix=_prefix)
     app.include_router(estimates.router, prefix=_prefix)
     app.include_router(rewrites.router, prefix=_prefix)
     app.include_router(tables.router, prefix=_prefix)
@@ -82,6 +83,8 @@ def index() -> dict:
             "/queries/import",
             "/queries/{id}",
             "/queries/{id}/analyze",
+            "/query-templates",
+            "/query-templates/{fingerprint}/detail",
             "/estimates",
             "/rewrites",
             "/rewrites/generate",

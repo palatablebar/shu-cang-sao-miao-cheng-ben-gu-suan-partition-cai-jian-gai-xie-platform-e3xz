@@ -9,6 +9,7 @@ const router = useRouter()
 
 const nav = [
   { name: 'queries', label: '查询成本排行', code: 'S-01' },
+  { name: 'query-templates', label: '查询模板成本账', code: 'S-01B' },
   { name: 'rewrites', label: '改写建议', code: 'S-03' },
   { name: 'tables', label: '表与分区元数据', code: 'S-04' },
   { name: 'budget', label: '预算策略与批次', code: 'S-05' },

@@ -59,6 +59,7 @@ export function tone3(level: string | null | undefined): 'ok' | 'warn' | 'bad' |
     case 'prunable':
     case 'completed':
     case 'adopted':
+    case 'success':
       return 'ok'
     case 'medium':
     case 'warn':

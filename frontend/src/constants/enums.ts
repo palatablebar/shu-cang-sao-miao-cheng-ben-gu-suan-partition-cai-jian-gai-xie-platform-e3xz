@@ -54,6 +54,12 @@ export const RUN_STATUS_LABEL: Record<string, string> = {
   failed: '失败',
 }
 
+// 查询执行流水（query_execution.run_status）的状态标签
+export const EXECUTION_STATUS_LABEL: Record<string, string> = {
+  success: '成功',
+  failed: '失败',
+}
+
 export const SUGGESTION_STATUS_LABEL: Record<string, string> = {
   pending: '待采纳',
   adopted: '已采纳',

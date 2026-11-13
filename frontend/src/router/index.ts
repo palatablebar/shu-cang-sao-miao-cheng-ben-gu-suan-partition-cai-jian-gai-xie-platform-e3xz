@@ -18,6 +18,12 @@ const router = createRouter({
       meta: { title: '查询成本排行', sheet: 'S-01' },
     },
     {
+      path: '/query-templates',
+      name: 'query-templates',
+      component: () => import('../pages/TemplateLedgerPage.vue'),
+      meta: { title: '查询模板成本账', sheet: 'S-01B' },
+    },
+    {
       path: '/queries/:id',
       name: 'query-detail',
       component: () => import('../pages/QueryDetailPage.vue'),
